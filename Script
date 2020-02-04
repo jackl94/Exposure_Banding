@@ -1,0 +1,165 @@
+########## This Script is designed to band up ORDINAL Factors by exposure constraints input by the user ##########
+## it does so by creating 2 tails and then X no. of bands, it'll then check all constraints are hit and try again with x-1 bands in the case they aren't ##
+
+if(!require(RODBC)){
+  install.packages("RODBC")
+  library(RODBC)
+}
+
+if(!require(tidyverse)){
+  install.packages("tidyverse")
+  library(tidyverse)
+}
+
+
+
+### please link this to the SQL Table you'd like to import
+DataSource <- odbcDriverConnect('driver=SQL Server;server={server};
+                                database={DataBase};
+                                database={Full Table Link};
+                                trusted_connection=true')
+  
+### Please pull in ALL ordinal fields you'd like to band for and the Exposure
+DataInput <- sqlQuery(DataSource,
+                      paste("Select [Exposure_Pct]
+                              ,Floor(DateDiff(",'"YY",',"birthdate,Cover_sdate)) as Age
+                      from[GeminiTEMP].[dbo].[CarPolicyClaims_231219] 
+                      
+                      where liveflag = 0",sep=""))
+
+
+##Please make any adjustments to the DataInput (i.e. turning birthdate to Age, removing NA's for chosen Factor, renamign Exposure factor to 'Exposure',ect)
+
+DataInput <- DataInput[!is.na(DataInput$Age),]
+colnames(DataInput) <- c('Exposure','Age')
+
+
+
+
+
+
+
+
+
+
+
+
+##########################################################################
+### Please now select and run the code up to the END POINT Below #########
+
+
+
+
+
+
+ BandVar<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places){
+
+Data <- DataInput[order(DataInput[[Factor]]),c("Exposure",paste(Factor))]
+
+colnames(Data) <- c("Exposure","Factor")
+
+Data <- Data %>%
+          dplyr::group_by(Factor) %>%
+            dplyr::summarise(Exposure = sum(Exposure))
+
+Data$RunningExp <- cumsum(Data$Exposure)
+
+Tails <- max(Data$RunningExp)*(Tails_Exposure/100)
+
+MinExp <- max(Data$RunningExp)*(Minimum_Exposure/100)
+
+LTail <- as.numeric(Data[min(which(Data$RunningExp > Tails)),"Factor"])
+
+HTail <- as.numeric(Data[max(which(Data$RunningExp < (max(Data$RunningExp)-Tails))),"Factor"])
+
+FactorDist <- HTail - LTail
+
+
+
+loop <- Starting_Bands
+
+while(loop >= 1 & (ifelse(loop == Starting_Bands, TRUE,min(BandsExp) < MinExp))){
+
+Bands <- data.frame()
+
+BandSize <- FactorDist/loop
+
+BandsBase <- round(seq(from = LTail, to = HTail, by = BandSize), digits = Decimal_Places)
+Bands <-data.frame(matrix(unlist(BandsBase),nrow = length(BandsBase),byrow = TRUE))
+colnames(Bands) <- 'Base'
+Bands$Upper <- lead(Bands$Base,1)
+Bands <- rbind(c(NA,LTail),Bands)
+
+Bands$name  <- paste("( >",Bands$Base,", <=",Bands$Upper,sep = "")
+
+Bands <- Bands %>% 
+          mutate(name = ifelse(is.na(Base),paste("( <=",Bands$Upper,"]",sep = ""),name)) %>%
+          mutate(name = ifelse(is.na(Upper),paste("( > ",Bands$Base,"]",sep = ""),name))
+
+row <- 2
+for (row in row:(length(Bands$name)-1)){
+  
+if(all(!((Data$Factor > Bands[row,"Base"]) & (Data$Factor <= Bands[row,"Upper"])))){
+  Bands[row,"Exposure"] <- 0
+} else { 
+ Bands[row,"Exposure"] <- sum(Data[(Data$Factor > Bands[row,"Base"]) & (Data$Factor <= Bands[row,"Upper"]),"Exposure"])
+}
+
+}
+
+
+Bands[((Bands$Upper == LTail) %in% TRUE),"Exposure"] <- sum(Data[(Data$Factor <= LTail),"Exposure"])
+Bands[((Bands$Base == HTail) %in% TRUE),"Exposure"] <- sum(Data[(Data$Factor > HTail),"Exposure"])
+
+BandsExp <- Bands[3:length(Bands$name)-1,"Exposure"]
+loop <- loop - 1
+
+}
+
+
+Bands$name <- factor(Bands$name, levels = Bands$name)
+
+rm(BandsBase)
+rm(Data)
+rm(BandsExp)
+rm(BandSize)
+rm(FactorDist)
+rm(HTail)
+rm(LTail)
+rm(MinExp)
+rm(row)
+rm(loop)
+rm(Tails)
+
+
+  
+Outtable <- view(Bands)
+
+Outplot <- ggplot(Bands, aes(x = name, y = Exposure)) + 
+  geom_bar(stat = "identity", width = 0.5) + 
+  theme(axis.text.x = element_text(angle = 90))
+
+return(list(Outtable,Outplot))
+ } 
+
+
+
+
+################# END POINT ######################
+##################################################
+
+
+### Factor is the name of the factor as given from the SQL Table and must be entered as text (within quotations)
+### Starting_Bands is the number of bands you'd like the function to begin with, suggested = 100
+### Minimum_Exposure is the minimum PERCENTAGE you'd like in each band i.e. 2 = 2%
+### Tails_Exposure groups the high and low tail to contain atleast this % exposure i.e. 1 = 1%
+### Decimal_Places sets the bandings to how many decimal places you'd like. i.e. 2 = 0.01
+
+## example : BandVar('Age',100,0.5,0.25,0)
+
+BandVar('Age',100,1,1,0)
+
+BandVar(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places)
+
+
+  
