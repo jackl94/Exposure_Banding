@@ -14,48 +14,26 @@ if(!require(tidyverse)){
 
 
 ### please link this to the SQL Table you'd like to import
-DataSource <- odbcDriverConnect('driver=SQL Server;server={server};
-                                database={DataBase};
-                                database={Full Table Link};
-                                trusted_connection=true')
+DataSource <- odbcDriverConnect('driver=SQL Server;
+       server=192.168.1.5;
+       database=Pricing;
+       database=[Pricing].[dbo].[Confused_AS];
+       trusted_connection=true')
   
 ### Please pull in ALL ordinal fields you'd like to band for and the Exposure
-DataInput <- sqlQuery(DataSource,
-                      paste("Select [Exposure_Pct]
-                              ,Floor(DateDiff(",'"YY",',"birthdate,Cover_sdate)) as Age
-                      from[GeminiTEMP].[dbo].[CarPolicyClaims_231219] 
-                      
-                      where liveflag = 0",sep=""))
+DataInput <- sqlQuery(DataSource, "Select *
+                        from [Pricing].[dbo].[Confused_AS]")
 
-
-##Please make any adjustments to the DataInput (i.e. turning birthdate to Age, removing NA's for chosen Factor, renamign Exposure factor to 'Exposure',ect)
-
-DataInput <- DataInput[!is.na(DataInput$Age),]
-colnames(DataInput) <- c('Exposure','Age')
-
-
-
-
-
-
-
-
-
-
-
+rm(DataSource)
 
 ##########################################################################
 ### Please now select and run the code up to the END POINT Below #########
 
 
-
-
-
-
- BandVar<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places){
-
-Data <- DataInput[order(DataInput[[Factor]]),c("Exposure",paste(Factor))]
-
+BandVar<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places){
+DataStore <- DataInput[,c("Exposure",paste(Factor))]
+Data <- DataStore[order(DataStore[[Factor]]),c("Exposure",paste(Factor))]
+Data <- Data[!is.na(Data[[Factor]]),]
 colnames(Data) <- c("Exposure","Factor")
 
 Data <- Data %>%
@@ -140,9 +118,123 @@ Outplot <- ggplot(Bands, aes(x = name, y = Exposure)) +
   theme(axis.text.x = element_text(angle = 90))
 
 return(list(Outtable,Outplot))
+
+
  } 
 
 
+BandVarFinal<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places){
+  DataStore <- DataInput[,c("Exposure",paste(Factor))]
+  Data <- DataStore[order(DataStore[[Factor]]),c("Exposure",paste(Factor))]
+  Data <- Data[!is.na(Data[[Factor]]),]
+  colnames(Data) <- c("Exposure","Factor")
+  
+  Data <- Data %>%
+    dplyr::group_by(Factor) %>%
+    dplyr::summarise(Exposure = sum(Exposure))
+  
+  Data$RunningExp <- cumsum(Data$Exposure)
+  
+  Tails <- max(Data$RunningExp)*(Tails_Exposure/100)
+  
+  MinExp <- max(Data$RunningExp)*(Minimum_Exposure/100)
+  
+  LTail <- as.numeric(Data[min(which(Data$RunningExp > Tails)),"Factor"])
+  
+  HTail <- as.numeric(Data[max(which(Data$RunningExp < (max(Data$RunningExp)-Tails))),"Factor"])
+  
+  FactorDist <- HTail - LTail
+  
+  
+  
+  loop <- Starting_Bands
+  
+  while(loop >= 1 & (ifelse(loop == Starting_Bands, TRUE,min(BandsExp) < MinExp))){
+    
+    Bands <- data.frame()
+    
+    BandSize <- FactorDist/loop
+    
+    BandsBase <- round(seq(from = LTail, to = HTail, by = BandSize), digits = Decimal_Places)
+    Bands <-data.frame(matrix(unlist(BandsBase),nrow = length(BandsBase),byrow = TRUE))
+    colnames(Bands) <- 'Base'
+    Bands$Upper <- lead(Bands$Base,1)
+    Bands <- rbind(c(NA,LTail),Bands)
+    
+    Bands$name  <- paste("( >",Bands$Base,", <=",Bands$Upper,sep = "")
+    
+    Bands <- Bands %>% 
+      mutate(name = ifelse(is.na(Base),paste("( <=",Bands$Upper,"]",sep = ""),name)) %>%
+      mutate(name = ifelse(is.na(Upper),paste("( > ",Bands$Base,"]",sep = ""),name))
+    
+    row <- 2
+    for (row in row:(length(Bands$name)-1)){
+      
+      if(all(!((Data$Factor > Bands[row,"Base"]) & (Data$Factor <= Bands[row,"Upper"])))){
+        Bands[row,"Exposure"] <- 0
+      } else { 
+        Bands[row,"Exposure"] <- sum(Data[(Data$Factor > Bands[row,"Base"]) & (Data$Factor <= Bands[row,"Upper"]),"Exposure"])
+      }
+      
+    }
+    
+    
+    Bands[((Bands$Upper == LTail) %in% TRUE),"Exposure"] <- sum(Data[(Data$Factor <= LTail),"Exposure"])
+    Bands[((Bands$Base == HTail) %in% TRUE),"Exposure"] <- sum(Data[(Data$Factor > HTail),"Exposure"])
+    
+    BandsExp <- Bands[3:length(Bands$name)-1,"Exposure"]
+    loop <- loop - 1
+    
+  }
+  
+  
+  Bands$name <- factor(Bands$name, levels = Bands$name)
+  
+  rm(BandsBase)
+  rm(Data)
+  rm(BandsExp)
+  rm(BandSize)
+  rm(FactorDist)
+  rm(HTail)
+  rm(LTail)
+  rm(MinExp)
+  rm(row)
+  rm(loop)
+  rm(Tails)
+  
+  
+ 
+  
+  output<- numeric(nrow(DataStore))
+  errorCheck <- is.na(DataStore[,paste(Factor)])
+  topTail <- DataStore[,paste(Factor)] <= Bands[1,"Upper"]
+  TTail <- Bands[1,"name"]
+  Bottomtail <- DataStore[,paste(Factor)] > Bands[nrow(Bands),"Base"]
+  BTail <- Bands[nrow(Bands),"name"]
+  Band <- Bands[2:(nrow(Bands)-1),]
+  Sys.time()
+  
+  for(i in 1:nrow(DataStore)){
+    if(errorCheck[i]){
+      output[i]<- "Default"
+    } else if (topTail[i]){
+      output[i]<- TTail
+    } else if (Bottomtail[i]){
+      output[i]<- BTail
+    } else {
+      output[i]<- Band[DataStore[i,paste(Factor)] > as.numeric(Band$Base) & DataStore[i,paste(Factor)] <= as.numeric(Band$Upper),"name"]
+    }
+  }
+  Sys.time()
+  FactorBand <- factor(Bands[,"name"], levels = Bands[,"name"], ordered = TRUE)
+  DataStore$BandedFactor <- FactorBand[as.numeric(output)]
+  DataStore <<- DataStore
+  
+  Outtable <- DataStore
+
+  return(Outtable)
+  
+} 
 
 
 ################# END POINT ######################
@@ -157,9 +249,22 @@ return(list(Outtable,Outplot))
 
 ## example : BandVar('Age',100,0.5,0.25,0)
 
-BandVar('Age',100,1,1,0)
 
-BandVar(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places)
+##Please make any adjustments to the DataInput (i.e. turning birthdate to Age, removing NA's for chosen Factor, renamign Exposure factor to 'Exposure',ect)
+##for confused exposure is 1 as each quote is 1 
+
+### if no factor called Exposure is provided please relink it here.
+# E.G.
+#DataInput$Exposure <- 1
+#DataInput$Exposure <- DataInput$Weight
+DataInput$Exposure <- 1
+
+## use this formula to test different bandings and see the distribution
+BandVar('Age',100,0.1,2,0)
 
 
-  
+## Use this formula to add the desired bandings to the DataStore Output
+BandVarFinal('Age',100,0.1,2,0)
+
+
+
