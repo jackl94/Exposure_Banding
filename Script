@@ -11,18 +11,21 @@ if(!require(tidyverse)){
   library(tidyverse)
 }
 
-
+if(!require(viridis)){
+  install.packages("viridis")
+  library(viridis)
+}
 
 ### please link this to the SQL Table you'd like to import
 DataSource <- odbcDriverConnect('driver=SQL Server;
-       server=192.168.1.5;
-       database=Pricing;
-       database=[Pricing].[dbo].[Confused_AS];
+       server=z;
+       database=y;
+       database=x;
        trusted_connection=true')
   
 ### Please pull in ALL ordinal fields you'd like to band for and the Exposure
 DataInput <- sqlQuery(DataSource, "Select *
-                        from [Pricing].[dbo].[Confused_AS]")
+                        from x")
 
 rm(DataSource)
 
@@ -33,7 +36,7 @@ rm(DataSource)
 BandVar<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places){
 DataStore <- DataInput[,c("Exposure",paste(Factor))]
 Data <- DataStore[order(DataStore[[Factor]]),c("Exposure",paste(Factor))]
-Data <- Data[!is.na(Data[[Factor]]),]
+Data <- Data[!is.na(Data[[Factor]])&!is.na(Data$Exposure),]
 colnames(Data) <- c("Exposure","Factor")
 
 Data <- Data %>%
@@ -46,9 +49,9 @@ Tails <- max(Data$RunningExp)*(Tails_Exposure/100)
 
 MinExp <- max(Data$RunningExp)*(Minimum_Exposure/100)
 
-LTail <- as.numeric(Data[min(which(Data$RunningExp > Tails)),"Factor"])
+LTail <- round(as.numeric(Data[min(which(Data$RunningExp > Tails)),"Factor"]),digits = Decimal_Places)
 
-HTail <- as.numeric(Data[max(which(Data$RunningExp < (max(Data$RunningExp)-Tails))),"Factor"])
+HTail <- round(as.numeric(Data[max(which(Data$RunningExp < (max(Data$RunningExp)-Tails))),"Factor"]),digits = Decimal_Places)
 
 FactorDist <- HTail - LTail
 
@@ -110,7 +113,7 @@ rm(loop)
 rm(Tails)
 
 
-  
+Bands <<- Bands
 Outtable <- view(Bands)
 
 Outplot <- ggplot(Bands, aes(x = name, y = Exposure)) + 
@@ -123,8 +126,9 @@ return(list(Outtable,Outplot))
  } 
 
 
-BandVarFinal<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places){
-  DataStore <- DataInput[,c("Exposure",paste(Factor))]
+BandVarModelQW<- function(ModelFactor,Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places){
+  DataStore <- DataInput[,c("Exposure",paste(Factor),paste(ModelFactor),"QuoteDate")]
+  DataStore$QuoteDate <- week(DataStore$QuoteDate)
   Data <- DataStore[order(DataStore[[Factor]]),c("Exposure",paste(Factor))]
   Data <- Data[!is.na(Data[[Factor]]),]
   colnames(Data) <- c("Exposure","Factor")
@@ -139,9 +143,142 @@ BandVarFinal<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,De
   
   MinExp <- max(Data$RunningExp)*(Minimum_Exposure/100)
   
-  LTail <- as.numeric(Data[min(which(Data$RunningExp > Tails)),"Factor"])
+  LTail <- round(as.numeric(Data[min(which(Data$RunningExp > Tails)),"Factor"]),digits = Decimal_Places)
   
-  HTail <- as.numeric(Data[max(which(Data$RunningExp < (max(Data$RunningExp)-Tails))),"Factor"])
+  HTail <- round(as.numeric(Data[max(which(Data$RunningExp < (max(Data$RunningExp)-Tails))),"Factor"]),digits = Decimal_Places)
+  
+  FactorDist <- HTail - LTail
+  
+  
+  
+  loop <- Starting_Bands
+  
+  while(loop >= 1 & (ifelse(loop == Starting_Bands, TRUE,min(BandsExp) < MinExp))){
+    
+    Bands <- data.frame()
+    
+    BandSize <- FactorDist/loop
+    
+    BandsBase <- round(seq(from = LTail, to = HTail, by = BandSize), digits = Decimal_Places)
+    Bands <-data.frame(matrix(unlist(BandsBase),nrow = length(BandsBase),byrow = TRUE))
+    colnames(Bands) <- 'Base'
+    Bands$Upper <- lead(Bands$Base,1)
+    Bands <- rbind(c(NA,LTail),Bands)
+    
+    Bands$name  <- paste("( >",Bands$Base,", <=",Bands$Upper,sep = "")
+    
+    Bands <- Bands %>% 
+      mutate(name = ifelse(is.na(Base),paste("( <=",Bands$Upper,"]",sep = ""),name)) %>%
+      mutate(name = ifelse(is.na(Upper),paste("( > ",Bands$Base,"]",sep = ""),name))
+    
+    row <- 2
+    for (row in row:(length(Bands$name)-1)){
+      
+      if(all(!((Data$Factor > Bands[row,"Base"]) & (Data$Factor <= Bands[row,"Upper"])))){
+        Bands[row,"Exposure"] <- 0
+      } else { 
+        Bands[row,"Exposure"] <- sum(Data[(Data$Factor > Bands[row,"Base"]) & (Data$Factor <= Bands[row,"Upper"]),"Exposure"])
+      }
+      
+    }
+    
+    
+    Bands[((Bands$Upper == LTail) %in% TRUE),"Exposure"] <- sum(Data[(Data$Factor <= LTail),"Exposure"])
+    Bands[((Bands$Base == HTail) %in% TRUE),"Exposure"] <- sum(Data[(Data$Factor > HTail),"Exposure"])
+    
+    BandsExp <- Bands[3:length(Bands$name)-1,"Exposure"]
+    loop <- loop - 1
+    
+  }
+  
+  
+  Bands$name <- factor(Bands$name, levels = Bands$name)
+  
+  rm(BandsBase)
+  rm(Data)
+  rm(BandsExp)
+  rm(BandSize)
+  rm(FactorDist)
+  rm(HTail)
+  rm(LTail)
+  rm(MinExp)
+  rm(row)
+  rm(loop)
+  rm(Tails)
+  
+
+  Outtable <- view(Bands)
+  
+  Outplot <- ggplot(Bands, aes(x = name, y = Exposure)) + 
+    geom_bar(stat = "identity", width = 0.5) + 
+    theme(axis.text.x = element_text(angle = 90))
+  
+  
+  output<- numeric(nrow(DataStore))
+  errorCheck <- is.na(DataStore[,paste(Factor)])|is.na(DataStore[,paste(ModelFactor)])
+  topTail <- DataStore[,paste(Factor)] <= Bands[1,"Upper"]
+  TTail <- Bands[1,"name"]
+  Bottomtail <- DataStore[,paste(Factor)] > Bands[nrow(Bands),"Base"]
+  BTail <- Bands[nrow(Bands),"name"]
+  Band <- Bands[2:(nrow(Bands)-1),]
+  
+  
+  for(i in 1:nrow(DataStore)){
+    if(errorCheck[i]){
+      output[i]<- "Default"
+    } else if (topTail[i]){
+      output[i]<- TTail
+    } else if (Bottomtail[i]){
+      output[i]<- BTail
+    } else {
+      output[i]<- Band[DataStore[i,paste(Factor)] > as.numeric(Band$Base) & DataStore[i,paste(Factor)] <= as.numeric(Band$Upper),"name"]
+    }
+  }
+  
+  DataStore$Band <- output
+  
+  colnames(DataStore) <- c("Exposure","Factor","ModelFactor","QuoteDate","Band")
+  
+  DataVis <-  DataStore %>% 
+    dplyr::group_by(Band,QuoteDate) %>%
+    summarise('Count' = n(),'Dependant' = mean(ModelFactor)) 
+  
+  colnames(DataVis)<- c("Variable","Date","Count","Dependant")
+  
+  
+  Outplot2 <- ggplot(DataVis,  aes(x= Date, y = Dependant, group = Variable)) + 
+    geom_line(aes( colour = Variable)) +
+    ggtitle(paste(Factor)) 
+  
+ 
+    
+  
+  
+  return(list(Outtable,Outplot,Outplot2))
+  
+  
+} 
+
+BandVarModelQM<- function(ModelFactor,Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,Decimal_Places){
+  DataStore <- DataInput[,c("Exposure",paste(Factor),paste(ModelFactor),"QuoteDate")]
+  DataStore$QuoteDate <- month(DataStore$QuoteDate)
+  Data <- DataStore[order(DataStore[[Factor]]),c("Exposure",paste(Factor))]
+  Data <- Data[!is.na(Data[[Factor]]),]
+  colnames(Data) <- c("Exposure","Factor")
+  
+  Data <- Data %>%
+    dplyr::group_by(Factor) %>%
+    dplyr::summarise(Exposure = sum(Exposure))
+  
+  Data$RunningExp <- cumsum(Data$Exposure)
+  
+  Tails <- max(Data$RunningExp)*(Tails_Exposure/100)
+  
+  MinExp <- max(Data$RunningExp)*(Minimum_Exposure/100)
+  
+  LTail <- round(as.numeric(Data[min(which(Data$RunningExp > Tails)),"Factor"]),digits = Decimal_Places)
+  
+  HTail <- round(as.numeric(Data[max(which(Data$RunningExp < (max(Data$RunningExp)-Tails))),"Factor"]),digits = Decimal_Places)
   
   FactorDist <- HTail - LTail
   
@@ -203,16 +340,21 @@ BandVarFinal<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,De
   rm(Tails)
   
   
- 
+  Outtable <- view(Bands)
+  
+  Outplot <- ggplot(Bands, aes(x = name, y = Exposure)) + 
+    geom_bar(stat = "identity", width = 0.5) + 
+    theme(axis.text.x = element_text(angle = 90))
+  
   
   output<- numeric(nrow(DataStore))
-  errorCheck <- is.na(DataStore[,paste(Factor)])
+  errorCheck <- is.na(DataStore[,paste(Factor)])|is.na(DataStore[,paste(ModelFactor)])
   topTail <- DataStore[,paste(Factor)] <= Bands[1,"Upper"]
   TTail <- Bands[1,"name"]
   Bottomtail <- DataStore[,paste(Factor)] > Bands[nrow(Bands),"Base"]
   BTail <- Bands[nrow(Bands),"name"]
   Band <- Bands[2:(nrow(Bands)-1),]
-  Sys.time()
+  
   
   for(i in 1:nrow(DataStore)){
     if(errorCheck[i]){
@@ -225,22 +367,33 @@ BandVarFinal<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,De
       output[i]<- Band[DataStore[i,paste(Factor)] > as.numeric(Band$Base) & DataStore[i,paste(Factor)] <= as.numeric(Band$Upper),"name"]
     }
   }
-  Sys.time()
-  FactorBand <- factor(Bands[,"name"], levels = Bands[,"name"], ordered = TRUE)
-  DataStore$BandedFactor <- FactorBand[as.numeric(output)]
-  DataStore <<- DataStore
   
-  Outtable <- DataStore
-
-  return(Outtable)
+  DataStore$Band <- output
+  
+  colnames(DataStore) <- c("Exposure","Factor","ModelFactor","QuoteDate","Band")
+  
+  DataVis <-  DataStore %>% 
+    dplyr::group_by(Band,QuoteDate) %>%
+    summarise('Count' = n(),'Dependant' = mean(ModelFactor)) 
+  
+  colnames(DataVis)<- c("Variable","Date","Count","Dependant")
+  
+  
+  Outplot2 <- ggplot(DataVis,  aes(x= Variable, y = Dependant, group = Date)) + 
+    geom_line(aes( colour = Date)) +
+    ggtitle(paste(Factor))  
+  
+  
+  
+  return(list(Outtable,Outplot,Outplot2))
+  
   
 } 
-
 
 ################# END POINT ######################
 ##################################################
 
-
+### ModelFactor, the dependant variable we will be modelling
 ### Factor is the name of the factor as given from the SQL Table and must be entered as text (within quotations)
 ### Starting_Bands is the number of bands you'd like the function to begin with, suggested = 100
 ### Minimum_Exposure is the minimum PERCENTAGE you'd like in each band i.e. 2 = 2%
@@ -258,13 +411,19 @@ BandVarFinal<- function(Factor,Starting_Bands,Minimum_Exposure,Tails_Exposure,De
 #DataInput$Exposure <- 1
 #DataInput$Exposure <- DataInput$Weight
 DataInput$Exposure <- 1
+DataInput <- DataBUp
 
 ## use this formula to test different bandings and see the distribution
-BandVar('Age',100,0.1,2,0)
 
+DataInput$MonthlyPremPct <- DataInput$MonthlyPremium/DataInput$Top5Monthly
+BandVar('VehicleValue',100,1,2,0)
 
-## Use this formula to add the desired bandings to the DataStore Output
-BandVarFinal('Age',100,0.1,2,0)
+DataInput$MonthlyPremPct
+## Use these formulas to get a Time Consistency view by QW(Quote Week) & QM (Quote Month) 
+##- note the current data isn't a full year so concentrate more on the months we have
+BandVarModelQW('QuotePosition','VehicleValue',100,1,2,0)
+
+BandVarModelQM('QuotePosition','MonthlyPremPct',100,1,2,2)
 
 
 
